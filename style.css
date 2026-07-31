@@ -1,0 +1,62 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0f1016;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+}
+
+#c {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+/* Measured by JS to keep the tray clear of the home indicator / notch. */
+.probe {
+  position: fixed;
+  left: 0;
+  width: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+#safeTop    { top: 0;    height: env(safe-area-inset-top, 0px); }
+#safeBottom { bottom: 0; height: env(safe-area-inset-bottom, 0px); }
+
+/* Debug only. Never visible during a test session. */
+#debug {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 14px;
+  background: rgba(10, 11, 16, 0.94);
+  color: #cfd3e0;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  z-index: 10;
+}
+#debug[hidden] { display: none; }
+#debug pre { white-space: pre-wrap; }
+#debug .row { display: flex; gap: 8px; margin-top: 10px; }
+#debug button {
+  flex: 1;
+  padding: 10px;
+  font: inherit;
+  color: #cfd3e0;
+  background: #21242f;
+  border: 0;
+  border-radius: 6px;
+}

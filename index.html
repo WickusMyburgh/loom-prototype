@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f1016">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Loom</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<!-- safe-area probes, measured by JS -->
+<div id="safeTop" class="probe"></div>
+<div id="safeBottom" class="probe"></div>
+
+<!-- hidden debug panel: five taps in the top-left corner -->
+<div id="debug" hidden>
+  <pre id="debugText"></pre>
+  <div class="row">
+    <button id="debugReset">reset stats</button>
+    <button id="debugClose">close</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
