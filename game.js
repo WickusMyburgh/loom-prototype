@@ -85,6 +85,15 @@
     board.push(new Array(COLS).fill(null));
   }
 
+  // Provenance grid, parallel to `board`. Each filled cell holds a reference to
+  // the placement record that put it there, so a weaving row can name exactly
+  // which player actions built it. Holding references rather than ids means
+  // records for pieces that never wove are collected on their own.
+  var owner = [];
+  for (var or = 0; or < ROWS; or++) {
+    owner.push(new Array(COLS).fill(null));
+  }
+
   var tray = [makePiece(FULL_SET), makePiece(FULL_SET), makePiece(FULL_SET)];
   var drag = null;      // { slot, piece, x, y, pointerId }
   var weave = null;     // { rows, set, map, t0 }
@@ -188,6 +197,53 @@
   });
   window.addEventListener('pagehide', function () { tickSession(); save(); });
 
+  // -------------------------------------------------------------- the cloth
+  // An ordered array of TraitVectors, one per woven row, oldest first. The
+  // index of a band in this array is its N — what the amplification curve in
+  // prototype 02 step 2 will read. Traits are captured once at the weave
+  // moment and never recomputed, so this file only ever appends.
+
+  var CLOTH_KEY = 'loom.cloth.v1';
+
+  // TraitVector { density, bias, tempo, setup }
+  //   density  0..1   how packed the board was around the row as it wove
+  //   bias    -1..+1  negative = the row was built left of centre, positive = right
+  //   tempo    0..1   1 = fast and decisive, 0 = slow and deliberate
+  //   setup    0..1   0 = a lone row, 1 = four rows weaving together
+  var cloth = [];
+
+  try {
+    var clothRaw = localStorage.getItem(CLOTH_KEY);
+    if (clothRaw) {
+      var loaded = JSON.parse(clothRaw);
+      if (Object.prototype.toString.call(loaded) === '[object Array]') {
+        for (var ci = 0; ci < loaded.length; ci++) {
+          var band = loaded[ci];
+          if (band && isNum(band.density) && isNum(band.bias) &&
+              isNum(band.tempo) && isNum(band.setup)) {
+            cloth.push({
+              density: band.density, bias: band.bias,
+              tempo: band.tempo, setup: band.setup
+            });
+          } else {
+            // Substitute a neutral band rather than dropping it. Dropping would
+            // renumber every later band, and N drives amplification — one bad
+            // entry would quietly restyle the whole rest of the cloth.
+            cloth.push({ density: 0.5, bias: 0, tempo: 0.5, setup: 0 });
+          }
+        }
+      }
+    }
+  } catch (e) { /* private mode or corrupt entry — start a fresh cloth */ }
+
+  function isNum(v) { return typeof v === 'number' && isFinite(v); }
+
+  function round4(v) { return Math.round(v * 1e4) / 1e4; }
+
+  function saveCloth() {
+    try { localStorage.setItem(CLOTH_KEY, JSON.stringify(cloth)); } catch (e) {}
+  }
+
   // -------------------------------------------------------------------- audio
   // One placement tick, one weave chime. Nothing else.
 
@@ -250,10 +306,87 @@
     return false;
   }
 
-  function place(piece, col, row) {
+  function place(piece, col, row, record) {
     for (var i = 0; i < piece.cells.length; i++) {
-      board[row + piece.cells[i][1]][col + piece.cells[i][0]] = piece.color;
+      var r = row + piece.cells[i][1];
+      var c = col + piece.cells[i][0];
+      board[r][c] = piece.color;
+      owner[r][c] = record;
     }
+  }
+
+  // ------------------------------------------------------------------ traits
+  // Captured at the weave moment, from the placements that built the row.
+  // Every number here traces back to something the player did.
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  // Fraction of the rows immediately above and below that are filled. Rows off
+  // the board are not counted at all rather than counted as empty, so a row
+  // weaving at the top edge is not scored as artificially sparse.
+  function densityAt(row) {
+    var filled = 0, total = 0;
+    var neighbours = [row - 1, row + 1];
+    for (var n = 0; n < neighbours.length; n++) {
+      var r = neighbours[n];
+      if (r < 0 || r >= ROWS) continue;
+      for (var c = 0; c < COLS; c++) {
+        total++;
+        if (board[r][c]) filled++;
+      }
+    }
+    return total ? filled / total : 0;
+  }
+
+  // Distinct placements that contributed at least one cell to this row.
+  function contributorsOf(row) {
+    var out = [];
+    for (var c = 0; c < COLS; c++) {
+      var rec = owner[row][c];
+      if (rec && out.indexOf(rec) === -1) out.push(rec);
+    }
+    return out;
+  }
+
+  function median(values) {
+    if (!values.length) return 0;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    var mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // One TraitVector per woven row. `rowsInEvent` is shared by every row in the
+  // same weave — that is what Setup measures.
+  function captureTraits(row, rowsInEvent) {
+    var contributors = contributorsOf(row);
+    var centres = [], durations = [], i;
+
+    for (i = 0; i < contributors.length; i++) {
+      var rec = contributors[i];
+      // A piece spans columns; its centre is the honest single x for it.
+      centres.push(rec.col + (rec.w - 1) / 2);
+      durations.push(rec.dragMs);
+    }
+
+    var boardCentre = (COLS - 1) / 2;
+    var meanCentre = boardCentre;
+    if (centres.length) {
+      var sum = 0;
+      for (i = 0; i < centres.length; i++) sum += centres[i];
+      meanCentre = sum / centres.length;
+    }
+
+    // Slow, deliberate drags normalise toward 0; fast, decisive ones toward 1,
+    // so the number reads the same direction as the word "tempo".
+    var ms = clamp(median(durations), 200, 3000);
+    var tempo = 1 - (ms - 200) / 2800;
+
+    return {
+      density: round4(clamp(densityAt(row), 0, 1)),
+      bias: round4(clamp((meanCentre - boardCentre) / boardCentre, -1, 1)),
+      tempo: round4(clamp(tempo, 0, 1)),
+      setup: round4((clamp(rowsInEvent, 1, 4) - 1) / 3)
+    };
   }
 
   function checkWeaves() {
@@ -275,6 +408,15 @@
       stats.weaves += rows.length;
       save();
       soundWeave(rows.length);
+
+      // Capture before finishWeave() rearranges the board — the traits describe
+      // the board as the player left it. `counted` is false only for the
+      // no-fail rescue weave, which the player did not complete and is never
+      // told about, so it must not put a band in the cloth.
+      for (var t = 0; t < rows.length; t++) {
+        cloth.push(captureTraits(rows[t], rows.length));
+      }
+      saveCloth();
     }
     var set = {};
     for (var i = 0; i < rows.length; i++) set[rows[i]] = 1;
@@ -298,13 +440,18 @@
   }
 
   function finishWeave() {
-    var next = [];
-    for (var i = 0; i < ROWS; i++) next.push(new Array(COLS).fill(null));
+    var next = [], nextOwner = [];
+    for (var i = 0; i < ROWS; i++) {
+      next.push(new Array(COLS).fill(null));
+      nextOwner.push(new Array(COLS).fill(null));
+    }
     for (var row = 0; row < ROWS; row++) {
       if (weave.set[row]) continue;
       next[weave.map[row]] = board[row];
+      nextOwner[weave.map[row]] = owner[row];   // provenance moves with the cells
     }
     board = next;
+    owner = nextOwner;
     weave = null;
     ensurePlayable();
   }
@@ -389,7 +536,10 @@
     var slot = slotAt(p.x, p.y);
     if (slot < 0 || !tray[slot]) return;
 
-    drag = { slot: slot, piece: tray[slot], x: p.x, y: p.y, pointerId: e.pointerId };
+    drag = {
+      slot: slot, piece: tray[slot], x: p.x, y: p.y, pointerId: e.pointerId,
+      tPickup: performance.now()                   // start of the Tempo measure
+    };
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   }
 
@@ -412,12 +562,21 @@
     var target = ghostTarget();
     var piece = drag.piece;
     var slot = drag.slot;
+    var tPickup = drag.tPickup;
     releasePointer(e.pointerId);
     drag = null;
 
     if (!target || !target.legal) return;          // back to the tray, silently
 
-    place(piece, target.col, target.row);
+    // What this placement was, for any row it later helps weave. Cancelled and
+    // illegal drags never get here, so they never colour a band.
+    place(piece, target.col, target.row, {
+      col: target.col,
+      row: target.row,
+      w: piece.w,
+      h: piece.h,
+      dragMs: performance.now() - tPickup
+    });
     tray[slot] = null;
 
     stats.placements++;
@@ -485,6 +644,35 @@
     if (taps.length >= 5) { taps.length = 0; showDebug(); }
   }
 
+  function pad(v, n) {
+    var s = '' + v;
+    while (s.length < n) s += ' ';
+    return s;
+  }
+
+  // Signed, fixed width, so the columns line up and a drifting trait is
+  // obvious at a glance.
+  function sig(v) {
+    var s = (v < 0 ? '-' : '+') + Math.abs(v).toFixed(2);
+    return pad(s, 6);
+  }
+
+  function clothAverage() {
+    var sum = { density: 0, bias: 0, tempo: 0, setup: 0 };
+    if (!cloth.length) return sum;
+    for (var i = 0; i < cloth.length; i++) {
+      sum.density += cloth[i].density;
+      sum.bias += cloth[i].bias;
+      sum.tempo += cloth[i].tempo;
+      sum.setup += cloth[i].setup;
+    }
+    sum.density /= cloth.length;
+    sum.bias /= cloth.length;
+    sum.tempo /= cloth.length;
+    sum.setup /= cloth.length;
+    return sum;
+  }
+
   function showDebug() {
     tickSession();
     save();
@@ -495,8 +683,23 @@
       'placements       ' + stats.placements,
       'weaves           ' + stats.weaves,
       '',
-      'per session (ttfm / length)'
+      'cloth            ' + cloth.length + ' bands'
     ];
+
+    // Newest bands first: N is the index the amplification curve will read.
+    if (cloth.length) {
+      lines.push('  N    dens   bias   temp   setup');
+      for (var b = cloth.length - 1; b >= Math.max(0, cloth.length - 12); b--) {
+        var v = cloth[b];
+        lines.push('  ' + pad(b, 4) + ' ' + sig(v.density) + ' ' + sig(v.bias) +
+                   ' ' + sig(v.tempo) + ' ' + sig(v.setup));
+      }
+      var avg = clothAverage();
+      lines.push('  avg  ' + sig(avg.density) + ' ' + sig(avg.bias) +
+                 ' ' + sig(avg.tempo) + ' ' + sig(avg.setup));
+    }
+
+    lines.push('', 'per session (ttfm / length)');
     for (var i = stats.sessions.length - 1; i >= 0; i--) {
       var s = stats.sessions[i];
       lines.push('  #' + s.n + '  ' + (s.ttfm === null ? '-' : s.ttfm + ' ms') + '  /  ' + s.len + ' ms');
@@ -518,6 +721,30 @@
     startedAt = performance.now();
     hasPlaced = false;
     save();
+    showDebug();
+  });
+
+  // Deliberately separate from "reset stats", and deliberately two-step: a
+  // cloth is the whole point of prototype 02 and there is no undo.
+  var clothBtn = document.getElementById('debugResetCloth');
+  var armed = false;
+  clothBtn.addEventListener('click', function () {
+    if (!armed) {
+      armed = true;
+      clothBtn.classList.add('armed');
+      clothBtn.textContent = 'erase cloth — tap again';
+      setTimeout(function () {
+        armed = false;
+        clothBtn.classList.remove('armed');
+        clothBtn.textContent = 'erase cloth';
+      }, 3000);
+      return;
+    }
+    armed = false;
+    clothBtn.classList.remove('armed');
+    clothBtn.textContent = 'erase cloth';
+    cloth.length = 0;
+    saveCloth();
     showDebug();
   });
 

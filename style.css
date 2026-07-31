@@ -60,3 +60,6 @@ body {
   border: 0;
   border-radius: 6px;
 }
+/* Erasing a cloth is not recoverable — make it look like it. */
+#debug button.danger { color: #e8a0a0; background: #2e1f22; }
+#debug button.danger.armed { color: #12131a; background: #e0574a; }
