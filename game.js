@@ -198,10 +198,10 @@
   window.addEventListener('pagehide', function () { tickSession(); save(); });
 
   // -------------------------------------------------------------- the cloth
-  // An ordered array of TraitVectors, one per woven row, oldest first. The
-  // index of a band in this array is its N — what the amplification curve in
-  // prototype 02 step 2 will read. Traits are captured once at the weave
-  // moment and never recomputed, so this file only ever appends.
+  // An ordered array of TraitVectors, one per woven row, oldest first. Traits
+  // are captured once at the weave moment and never recomputed, so this array
+  // is only ever appended to. A band's N — what the amplification curve reads
+  // — is its array index plus one; see amplify() for why it is 1-based.
 
   var CLOTH_KEY = 'loom.cloth.v1';
 
@@ -242,6 +242,64 @@
 
   function saveCloth() {
     try { localStorage.setItem(CLOTH_KEY, JSON.stringify(cloth)); } catch (e) {}
+  }
+
+  // ------------------------------------------------------ front-loading
+  // Almost nobody plays long enough for character to emerge on its own, so
+  // early bands are exaggerated and later ones settle:
+  //
+  //   amplified = neutral + (raw - neutral) * (1 + k / (N + c))
+  //
+  // N is 1-based. That is not a guess — with k=6, c=2 it reproduces the
+  // brief's stated curve exactly (band 1 = 3.00x, band 10 = 1.50x,
+  // band 50 = 1.12x). Treating N as a 0-based array index would make the
+  // first band 4.00x and shift the whole curve.
+  //
+  // These two constants are the most important numbers in the system, so they
+  // are tunable live from the debug panel and persist across sessions.
+
+  var TUNE_KEY = 'loom.tune.v1';
+  var K_DEFAULT = 6, C_DEFAULT = 2;
+  var tuneK = K_DEFAULT, tuneC = C_DEFAULT;
+
+  try {
+    var tuneRaw = localStorage.getItem(TUNE_KEY);
+    if (tuneRaw) {
+      var tune = JSON.parse(tuneRaw);
+      if (tune && isNum(tune.k)) tuneK = tune.k;
+      if (tune && isNum(tune.c)) tuneC = tune.c;
+    }
+  } catch (e) { /* fall back to the brief's starting values */ }
+
+  function saveTune() {
+    try { localStorage.setItem(TUNE_KEY, JSON.stringify({ k: tuneK, c: tuneC })); } catch (e) {}
+  }
+
+  // c only has to stay clear of N + c === 0. N starts at 1, so anything above
+  // -1 is safe; clamping at 0 keeps the curve monotonic and easy to reason about.
+  function amplifyFactor(n) {
+    return 1 + tuneK / (n + Math.max(0, tuneC));
+  }
+
+  // Each trait is stretched away from its own neutral point, not from a shared
+  // 0.5. Bias runs -1..+1 and is neutral at dead centre of the board, so
+  // stretching it about 0.5 would drag every band rightward.
+  function amplifyTrait(raw, neutral, lo, hi, n) {
+    return clamp(neutral + (raw - neutral) * amplifyFactor(n), lo, hi);
+  }
+
+  // Read-time only. Nothing here is ever written back to the cloth — the raw
+  // capture stays canonical, so retuning k and c restyles the whole history
+  // rather than only the bands woven after the change.
+  function amplified(index) {
+    var v = cloth[index];
+    var n = index + 1;
+    return {
+      density: amplifyTrait(v.density, 0.5, 0, 1, n),
+      bias: amplifyTrait(v.bias, 0, -1, 1, n),
+      tempo: amplifyTrait(v.tempo, 0.5, 0, 1, n),
+      setup: amplifyTrait(v.setup, 0.5, 0, 1, n)
+    };
   }
 
   // -------------------------------------------------------------------- audio
@@ -617,9 +675,18 @@
   canvas.addEventListener('pointercancel', onCancel);
   canvas.addEventListener('lostpointercapture', onCancel);
 
-  // Belt and braces against scroll / pull-to-refresh / double-tap zoom.
-  document.addEventListener('touchstart', function (e) { e.preventDefault(); }, { passive: false });
-  document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+  // Belt and braces against scroll / pull-to-refresh / double-tap zoom — but
+  // the debug panel is a scrollable DOM overlay, so touches inside it have to
+  // pass through or its controls become unreachable on a phone.
+  function inPanel(e) {
+    return panel && !panel.hidden && e.target && panel.contains(e.target);
+  }
+  document.addEventListener('touchstart', function (e) {
+    if (!inPanel(e)) e.preventDefault();
+  }, { passive: false });
+  document.addEventListener('touchmove', function (e) {
+    if (!inPanel(e)) e.preventDefault();
+  }, { passive: false });
   document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
   document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
@@ -641,7 +708,9 @@
     var now = performance.now();
     taps.push(now);
     while (taps.length && now - taps[0] > 2500) taps.shift();
-    if (taps.length >= 5) { taps.length = 0; showDebug(); }
+    // Sync only on open. Doing it inside showDebug() would rewrite the input
+    // mid-keystroke and fight anyone typing a two-digit k.
+    if (taps.length >= 5) { taps.length = 0; syncTuneInputs(); showDebug(); }
   }
 
   function pad(v, n) {
@@ -686,17 +755,28 @@
       'cloth            ' + cloth.length + ' bands'
     ];
 
-    // Newest bands first: N is the index the amplification curve will read.
+    // The curve itself, at the three points the brief calls out. This is the
+    // fastest read on whether a k/c change did what you wanted, and it works
+    // even on a cloth too short to show interesting bands.
+    lines.push('',
+      'amplify          k ' + tuneK.toFixed(2) + '   c ' + tuneC.toFixed(2),
+      '  N=1 ' + amplifyFactor(1).toFixed(2) + 'x' +
+      '   N=10 ' + amplifyFactor(10).toFixed(2) + 'x' +
+      '   N=50 ' + amplifyFactor(50).toFixed(2) + 'x');
+
+    // Newest bands first. N is 1-based, matching the amplification curve.
     if (cloth.length) {
-      lines.push('  N    dens   bias   temp   setup');
+      lines.push('', showAmplified ? 'bands (amplified)' : 'bands (raw)',
+                 '  N    dens   bias   temp   setup   x');
       for (var b = cloth.length - 1; b >= Math.max(0, cloth.length - 10); b--) {
-        var v = cloth[b];
-        lines.push('  ' + pad(b, 4) + ' ' + sig(v.density) + ' ' + sig(v.bias) +
-                   ' ' + sig(v.tempo) + ' ' + sig(v.setup));
+        var v = showAmplified ? amplified(b) : cloth[b];
+        lines.push('  ' + pad(b + 1, 4) + ' ' + sig(v.density) + ' ' + sig(v.bias) +
+                   ' ' + sig(v.tempo) + ' ' + sig(v.setup) +
+                   ' ' + amplifyFactor(b + 1).toFixed(2));
       }
       var avg = clothAverage();
       lines.push('  avg  ' + sig(avg.density) + ' ' + sig(avg.bias) +
-                 ' ' + sig(avg.tempo) + ' ' + sig(avg.setup));
+                 ' ' + sig(avg.tempo) + ' ' + sig(avg.setup) + '  (raw)');
     }
 
     lines.push('', 'per session (ttfm / length)');
@@ -707,6 +787,54 @@
     document.getElementById('debugText').textContent = lines.join('\n');
     panel.hidden = false;
   }
+
+  // --------------------------------------------------------- tuning controls
+
+  var showAmplified = true;
+  var kInput = document.getElementById('tuneK');
+  var cInput = document.getElementById('tuneC');
+  var toggleBtn = document.getElementById('tuneToggle');
+
+  function syncTuneInputs() {
+    kInput.value = tuneK;
+    cInput.value = tuneC;
+    toggleBtn.textContent = showAmplified ? 'show raw' : 'show amplified';
+  }
+
+  function readTuneInput(input, current) {
+    var v = parseFloat(input.value);
+    // Reject junk rather than letting NaN poison the curve and blank the table.
+    if (!isNum(v)) return current;
+    return clamp(v, 0, 40);
+  }
+
+  kInput.addEventListener('input', function () {
+    tuneK = readTuneInput(kInput, tuneK);
+    saveTune();
+    showDebug();
+  });
+  cInput.addEventListener('input', function () {
+    tuneC = readTuneInput(cInput, tuneC);
+    saveTune();
+    showDebug();
+  });
+  // Re-sync on blur so a rejected entry visibly snaps back to what is in use.
+  kInput.addEventListener('blur', syncTuneInputs);
+  cInput.addEventListener('blur', syncTuneInputs);
+
+  toggleBtn.addEventListener('click', function () {
+    showAmplified = !showAmplified;
+    syncTuneInputs();
+    showDebug();
+  });
+
+  document.getElementById('tuneDefaults').addEventListener('click', function () {
+    tuneK = K_DEFAULT;
+    tuneC = C_DEFAULT;
+    saveTune();
+    syncTuneInputs();
+    showDebug();
+  });
 
   document.getElementById('debugClose').addEventListener('click', function () {
     panel.hidden = true;
