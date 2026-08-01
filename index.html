@@ -20,7 +20,15 @@
 <!-- hidden debug panel: five taps in the top-left corner -->
 <div id="debug" hidden>
   <pre id="debugText"></pre>
+  <div class="row tune">
+    <label for="tuneK">k</label>
+    <input id="tuneK" type="number" step="0.5" min="0" max="40" inputmode="decimal">
+    <label for="tuneC">c</label>
+    <input id="tuneC" type="number" step="0.5" min="0" max="40" inputmode="decimal">
+    <button id="tuneDefaults">defaults</button>
+  </div>
   <div class="row">
+    <button id="tuneToggle">show raw</button>
     <button id="debugReset">reset stats</button>
     <button id="debugClose">close</button>
   </div>

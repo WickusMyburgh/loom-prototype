@@ -41,8 +41,15 @@ body {
 /* Debug only. Never visible during a test session. */
 #debug {
   position: fixed;
-  top: 0; left: 0; right: 0;
-  padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 14px;
+  inset: 0;
+  /* The band table plus the session list can outgrow a phone screen, and the
+     controls sit at the bottom — without this they scroll off unreachable. */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px
+           calc(env(safe-area-inset-bottom, 0px) + 14px);
   background: rgba(10, 11, 16, 0.94);
   color: #cfd3e0;
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -63,3 +70,18 @@ body {
 /* Erasing a cloth is not recoverable — make it look like it. */
 #debug button.danger { color: #e8a0a0; background: #2e1f22; }
 #debug button.danger.armed { color: #12131a; background: #e0574a; }
+
+/* k and c — the two constants worth tuning against real play. */
+#debug .row.tune { align-items: center; }
+#debug .row.tune label { flex: 0 0 auto; color: #8c93a6; }
+#debug .row.tune input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px 8px;
+  font: inherit;
+  color: #cfd3e0;
+  background: #21242f;
+  border: 1px solid #363b4a;
+  border-radius: 6px;
+}
+#debug .row.tune button { flex: 0 0 auto; padding: 10px 12px; }
