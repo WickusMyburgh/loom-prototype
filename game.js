@@ -689,7 +689,7 @@
     // Newest bands first: N is the index the amplification curve will read.
     if (cloth.length) {
       lines.push('  N    dens   bias   temp   setup');
-      for (var b = cloth.length - 1; b >= Math.max(0, cloth.length - 12); b--) {
+      for (var b = cloth.length - 1; b >= Math.max(0, cloth.length - 10); b--) {
         var v = cloth[b];
         lines.push('  ' + pad(b, 4) + ' ' + sig(v.density) + ' ' + sig(v.bias) +
                    ' ' + sig(v.tempo) + ' ' + sig(v.setup));
