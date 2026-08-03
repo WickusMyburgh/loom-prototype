@@ -18,6 +18,11 @@
 
   var WEAVE_MS = 220;          // under 250ms, per brief
   var WEAVE_LOCK = 0.32;       // first third: the row locks and holds, then pulls
+
+  var CLOTH_VISIBLE = 3;       // last three woven bands, visible from session start
+  var BAND_CELLS = 0.65;       // height of one band, in board cells. Enough
+                               // that a four-layer band still reads as layers.
+  var BAND_FADE_MS = 260;      // a new band arrives rather than popping
   var FINGER_LIFT = 1.5;       // dragged piece sits this many cells above the touch
 
   // ------------------------------------------------------------------- shapes
@@ -62,9 +67,12 @@
   var FULL_SET  = [I2, I3, L3, O4, I4, T4];
   var SMALL_SET = [I2, I3];                 // the silent no-fail refill
 
+  var activePalette = null;    // set once the cloth is loaded; see refill()
+
   function makePiece(sets) {
     var group = sets[(Math.random() * sets.length) | 0];
     var cells = group[(Math.random() * group.length) | 0];
+    var palette = activePalette || PALETTE;
     var w = 0, h = 0;
     for (var i = 0; i < cells.length; i++) {
       if (cells[i][0] + 1 > w) w = cells[i][0] + 1;
@@ -74,7 +82,7 @@
       cells: cells,
       w: w,
       h: h,
-      color: PALETTE[(Math.random() * PALETTE.length) | 0]
+      color: palette[(Math.random() * palette.length) | 0]
     };
   }
 
@@ -94,9 +102,13 @@
     owner.push(new Array(COLS).fill(null));
   }
 
-  var tray = [makePiece(FULL_SET), makePiece(FULL_SET), makePiece(FULL_SET)];
+  // Filled by refill() at startup rather than here, because the piece palette
+  // is shifted toward the cloth's running average and the cloth is not loaded
+  // until further down the file.
+  var tray = [null, null, null];
   var drag = null;      // { slot, piece, x, y, pointerId }
   var weave = null;     // { rows, set, map, t0 }
+  var bandAddedAt = 0;  // when the newest band arrived, for its fade-in
   // Anchored here, not in the first rAF: a page that starts backgrounded gets
   // no frames, and both timings would silently read zero.
   var startedAt = performance.now();
@@ -110,6 +122,7 @@
   var W = 0, H = 0, cell = 0;
   var boardX = 0, boardY = 0, boardW = 0, boardH = 0;
   var trayCell = 0, trayY = 0, trayBoxH = 0, dropLimitY = 0;
+  var clothY = 0, bandH = 0;
 
   function safeInset(id) {
     var el = document.getElementById(id);
@@ -130,16 +143,22 @@
     var bottom = safeInset('safeBottom');
 
     // Cell size derives from the screen: width-limited, with enough room left
-    // below the board for the drop zone plus a tray in the thumb arc.
-    // 4.6 cells of headroom = 1.5 for the drop zone, ~2.6 for the tray box.
+    // below the board for the drop zone plus a tray in the thumb arc, and
+    // above it for the strip of already-woven cloth.
+    // 4.6 cells below = 1.5 for the drop zone, ~2.6 for the tray box.
+    // 1.95 above = CLOTH_VISIBLE bands at BAND_CELLS each, plus a gap.
+    var above = CLOTH_VISIBLE * BAND_CELLS + 0.3;
     var byWidth = (W - 28) / COLS;
-    var byHeight = (H - top - bottom - 24) / (ROWS + 4.6);
+    var byHeight = (H - top - bottom - 24) / (ROWS + 4.6 + above);
     cell = Math.max(12, Math.floor(Math.min(byWidth, byHeight)));
 
     boardW = cell * COLS;
     boardH = cell * ROWS;
     boardX = Math.round((W - boardW) / 2);
-    boardY = Math.round(top + 16);
+
+    bandH = Math.max(6, Math.round(cell * BAND_CELLS));
+    clothY = Math.round(top + 12);
+    boardY = Math.round(clothY + bandH * CLOTH_VISIBLE + cell * 0.3);
 
     trayCell = Math.round(cell * 0.58);
     trayBoxH = trayCell * 4.4;
@@ -291,6 +310,26 @@
   // Read-time only. Nothing here is ever written back to the cloth — the raw
   // capture stays canonical, so retuning k and c restyles the whole history
   // rather than only the bands woven after the change.
+  // The starting palette leans a fraction toward the cloth's running average,
+  // so a session opens in the colour the player has been working in rather
+  // than snapping back to a default. A fraction, not a takeover — the pieces
+  // still have to read as distinct from each other.
+  function startingPalette() {
+    if (!cloth.length) return PALETTE.slice();
+    var target = tempColour(clothAverage().tempo);
+    return PALETTE.map(function (hex) {
+      return rgba(mix(hexToRgb(hex), target, 0.18));
+    });
+  }
+
+  function hexToRgb(hex) {
+    return [
+      parseInt(hex.slice(1, 3), 16),
+      parseInt(hex.slice(3, 5), 16),
+      parseInt(hex.slice(5, 7), 16)
+    ];
+  }
+
   function amplified(index) {
     var v = cloth[index];
     var n = index + 1;
@@ -300,6 +339,156 @@
       tempo: amplifyTrait(v.tempo, 0.5, 0, 1, n),
       setup: amplifyTrait(v.setup, 0.5, 0, 1, n)
     };
+  }
+
+  // ---------------------------------------------------------- weaving a band
+  // One trait, one channel — two traits driving the same property makes the
+  // cloth unreadable, so each of these four is the sole owner of its look:
+  //
+  //   density -> thread tightness   (how many threads, how fine)
+  //   bias    -> drift              (which way the threads lean)
+  //   tempo   -> colour temperature (warm and quick vs deep and slow)
+  //   setup   -> banding complexity (one pass, or layered passes)
+  //
+  // Texture detail is random, but every random draw is seeded from the band's
+  // own index. A band therefore looks identical frame to frame and session to
+  // session — randomness decorates, it never decides.
+
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) >>> 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Deep and cool through to warm and quick. Routed through a neutral midpoint
+  // rather than interpolated round the colour wheel, which would swing the
+  // middle of the range through green.
+  var TEMP_COOL = [54, 82, 132];
+  var TEMP_MID  = [122, 112, 126];
+  var TEMP_WARM = [194, 132, 76];
+
+  function mix(a, b, f) {
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * f),
+      Math.round(a[1] + (b[1] - a[1]) * f),
+      Math.round(a[2] + (b[2] - a[2]) * f)
+    ];
+  }
+
+  function tempColour(tempo) {
+    var t = clamp(tempo, 0, 1);
+    return t < 0.5 ? mix(TEMP_COOL, TEMP_MID, t / 0.5)
+                   : mix(TEMP_MID, TEMP_WARM, (t - 0.5) / 0.5);
+  }
+
+  function shade(c, amt) {
+    return [
+      clamp(Math.round(c[0] + 255 * amt), 0, 255),
+      clamp(Math.round(c[1] + 255 * amt), 0, 255),
+      clamp(Math.round(c[2] + 255 * amt), 0, 255)
+    ];
+  }
+
+  function rgba(c, alpha) {
+    return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (alpha === undefined ? 1 : alpha) + ')';
+  }
+
+  function drawBand(x, y, w, h, v, seed, alpha) {
+    var rand = mulberry32(seed * 2654435761);
+    var base = tempColour(v.tempo);
+    var density = clamp(v.density, 0, 1);
+
+    ctx.save();
+    ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+
+    ctx.fillStyle = rgba(shade(base, -0.09));
+    ctx.fillRect(x, y, w, h);
+
+    // Density: from an open, airy weave to a fine, closely spaced one. Thread
+    // width is set against the band height, not the gap — scaling it with the
+    // gap turns a sparse band into a row of blocks rather than open weave.
+    var threads = Math.round(5 + density * 26);
+    var gap = w / threads;
+    var lw = Math.max(1, h * (0.17 - density * 0.09));
+
+    // Bias: the whole pattern leans. Positive leans right going down.
+    var skew = clamp(v.bias, -1, 1) * w * 0.17;
+
+    // Setup: a lone row is one clean pass; rows woven together stack as
+    // visible layers. Deliberately stacked rather than overlaid — overlaying
+    // phase-shifted copies reads as a tighter weave, which would put setup and
+    // density on the same visual property.
+    var passes = 1 + Math.round(clamp(v.setup, 0, 1) * 3);
+    var passH = h / passes;
+
+    // Jitter is per thread, not per thread per pass. Drawing it fresh in each
+    // pass makes the layers wander out of alignment and the band reads as
+    // noise instead of strata.
+    var jitters = [];
+    for (var j = -1; j <= threads + 1; j++) jitters.push((rand() - 0.5) * gap * 0.3);
+
+    ctx.lineCap = 'butt';
+    for (var p = 0; p < passes; p++) {
+      var py = y + p * passH;
+      // Alternate the shade so the layers are countable at a glance.
+      ctx.strokeStyle = rgba(shade(base, 0.13 - (p % 2) * 0.06), 0.92);
+      ctx.lineWidth = lw;                      // from the full band, not passH,
+      for (var i = -1; i <= threads + 1; i++) { // so tightness is density's alone
+        var jitter = jitters[i + 1];
+        var tx = x + i * gap + jitter;
+        ctx.beginPath();
+        ctx.moveTo(tx - (skew / 2) * (passH / h), py);
+        ctx.lineTo(tx + (skew / 2) * (passH / h), py + passH);
+        ctx.stroke();
+      }
+      if (p > 0) {
+        ctx.strokeStyle = rgba(shade(base, -0.22), 0.75);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, py);
+        ctx.lineTo(x + w, py);
+        ctx.stroke();
+      }
+    }
+
+    // Weft, same channel as the warp so density stays the only thing driving
+    // tightness. Kept faint — it reads as cloth, not as a second signal.
+    var wefts = Math.max(1, Math.round(1 + density * 4));
+    ctx.strokeStyle = rgba(shade(base, -0.16), 0.5);
+    ctx.lineWidth = Math.max(0.6, h * 0.035);
+    for (var q = 1; q <= wefts; q++) {
+      var wy = y + (h * q) / (wefts + 1) + (rand() - 0.5) * h * 0.06;
+      ctx.beginPath();
+      ctx.moveTo(x, wy);
+      ctx.lineTo(x + w, wy);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // The strip of already-woven cloth above the board. The newest band sits
+  // closest to the board, where it just came from.
+  function drawCloth(now) {
+    for (var i = 0; i < CLOTH_VISIBLE; i++) {
+      var idx = cloth.length - 1 - i;
+      if (idx < 0) break;
+      var y = clothY + (CLOTH_VISIBLE - 1 - i) * bandH;
+      var alpha = 1;
+      if (i === 0 && bandAddedAt) {
+        alpha = clamp((now - bandAddedAt) / BAND_FADE_MS, 0, 1);
+      }
+      // One pixel short, so consecutive bands read as separate passes of the
+      // cloth instead of merging into a single field.
+      drawBand(boardX, y, boardW, bandH - 1, amplified(idx), idx, alpha);
+    }
   }
 
   // -------------------------------------------------------------------- audio
@@ -475,6 +664,9 @@
         cloth.push(captureTraits(rows[t], rows.length));
       }
       saveCloth();
+      // The new band fades in as the row is drawn up into the cloth, rather
+      // than appearing the instant the weave animation ends.
+      bandAddedAt = performance.now() + WEAVE_MS * WEAVE_LOCK;
     }
     var set = {};
     for (var i = 0; i < rows.length; i++) set[rows[i]] = 1;
@@ -1024,6 +1216,7 @@
     ctx.fillRect(0, 0, W, H);
 
     var target = drag ? ghostTarget() : null;
+    drawCloth(now);
     drawBoard(now);
     drawGhost(target);
     drawTray(now);
@@ -1036,6 +1229,8 @@
   if (window.ResizeObserver) {
     new ResizeObserver(layout).observe(canvas);
   }
+  activePalette = startingPalette();
+  refill();
   ensurePlayable();
   requestAnimationFrame(frame);
 })();
